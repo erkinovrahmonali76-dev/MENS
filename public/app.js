@@ -77,10 +77,14 @@ async function boot() {
   $('#ftag').textContent = s.tagline;
   $('#fname').textContent = s.shopName;
   $('#yr').textContent = new Date().getFullYear();
-  $('#topbar').textContent = `Yetkazib berish: ${money(s.freeDeliveryFrom)} dan yuqori buyurtmalarga BEPUL`;
+  $('#topbar').textContent = s.announcement || `Yetkazib berish: ${money(s.freeDeliveryFrom)} dan yuqori buyurtmalarga BEPUL`;
   $('#fcontact').innerHTML = `<a href="tel:${esc(s.phone.replace(/[^+\d]/g, ''))}">${esc(s.phone)}</a>` +
     (s.telegram ? `<a href="${esc(s.telegram.startsWith('http') ? s.telegram : 'https://t.me/' + s.telegram.replace('@', ''))}" target="_blank" rel="noopener">Telegram</a>` : '') + `<span>${esc(s.address)}</span>`;
   renderNav(); updAcc();
+  const tgUrl = s.telegram ? (s.telegram.startsWith('http') ? s.telegram : 'https://t.me/' + s.telegram.replace('@', '')) : 'tel:' + s.phone.replace(/[^+\d]/g, '');
+  const fl = document.createElement('a');
+  fl.className = 'floatc'; fl.href = tgUrl; fl.rel = 'noopener'; if (s.telegram) fl.target = '_blank';
+  fl.innerHTML = (s.telegram ? '✈️' : '📞') + ' <span>Savol bormi?</span>'; document.body.appendChild(fl);
   window.addEventListener('hashchange', route);
   route();
 }
@@ -153,6 +157,11 @@ function pageHome(app) {
       <div class="perk"><b>✅ Sifat kafolati</b><span>Har bir mahsulot tekshirib jo'natiladi</span></div>
       <div class="perk"><b>📞 Doimiy aloqa</b><span>${esc(S.shop.phone)}</span></div>
     </div>
+    <section class="blk"><div class="shead"><h2>Ko'p so'raladigan savollar</h2></div><div class="faqs">
+      <details class="faq"><summary>Buyurtmani qanday beraman?</summary><p>Mahsulotni tanlang, o'lchamini belgilab savatga qo'shing, ism va manzilingizni kiriting. So'ng kartaga to'lab, chek rasmini yuklang — admin tekshirib tasdiqlaydi.</p></details>
+      <details class="faq"><summary>Yetkazib berish qancha turadi?</summary><p>Yetkazib berish ${money(S.shop.deliveryFee)}. ${money(S.shop.freeDeliveryFrom)} dan yuqori buyurtmalarga yetkazib berish bepul.</p></details>
+      <details class="faq"><summary>Buyurtma holatini qanday bilaman?</summary><p>«Buyurtmalarim» bo'limida har bir buyurtmangiz bosqichma-bosqich ko'rinadi. Holat o'zgarganda sahifa o'zi yangilanadi.</p></details>
+    </div></section>
   </div>`;
 }
 
@@ -328,6 +337,16 @@ async function pageOrder(app, id, q) {
       <p style="font-size:14px"><b>${esc(o.name)}</b><br>${esc('+' + o.phone)}<br>${esc(o.address)}</p>${o.note ? `<p style="font-size:13.5px;color:var(--muted);margin-top:8px">Izoh: ${esc(o.note)}</p>` : ''}
       <p style="font-size:12.5px;color:var(--muted);margin-top:10px">Sana: ${esc(new Date(o.createdAt).toLocaleString('uz-UZ'))}</p></div></div></div>`;
 
+  clearInterval(window.__ot);
+  if (o.status !== 'done' && o.status !== 'cancelled') {
+    window.__ot = setInterval(async () => {
+      if (!location.hash.startsWith('#/order/')) { clearInterval(window.__ot); return; }
+      try {
+        const n = (await api(`/api/orders/${id}?t=${encodeURIComponent(t)}`)).order;
+        if (n.status !== o.status || n.payment.status !== o.payment.status) { clearInterval(window.__ot); pageOrder(app, id, q); }
+      } catch (e) { /* */ }
+    }, 15000);
+  }
   if ($('#cpcard')) $('#cpcard').onclick = () => copyText(o.payInfo.cardNumber.replace(/\s/g, ''));
   let receipt = null;
   if ($('#rcpt')) $('#rcpt').onchange = async (e) => {
