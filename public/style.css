@@ -212,3 +212,16 @@ footer .copy-r{border-top:1px solid #3a3528;margin-top:30px;padding-top:18px;fon
 }
 .msearch{display:none;padding:0 0 12px}
 @media(max-width:760px){.msearch{display:block}.msearch .searchbar{display:flex;width:100%}}
+
+/* ---- qo'shimchalar ---- */
+.floatc{position:fixed;right:18px;bottom:20px;z-index:60;background:var(--ink);color:#fff;border-radius:999px;padding:12px 18px;font-size:14px;font-weight:600;box-shadow:var(--shadow);display:flex;gap:8px;align-items:center;transition:.2s}
+.floatc:hover{background:var(--gold);transform:translateY(-2px)}
+@media(max-width:760px){.floatc span{display:none}.floatc{padding:14px;right:14px;bottom:16px}}
+.faqs{max-width:820px;margin:0 auto 20px;display:grid;gap:10px}
+.faq{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:0 18px;transition:.2s}
+.faq[open]{box-shadow:var(--shadow)}
+.faq summary{cursor:pointer;font-weight:600;padding:16px 0;list-style:none;display:flex;justify-content:space-between;gap:12px}
+.faq summary::-webkit-details-marker{display:none}
+.faq summary::after{content:'+';color:var(--gold);font-size:22px;line-height:1}
+.faq[open] summary::after{content:'–'}
+.faq p{padding:0 0 16px;color:var(--ink2);font-size:14.5px}
