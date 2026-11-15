@@ -186,6 +186,17 @@ function notify(text) {
     body: JSON.stringify({ chat_id: chat, text: String(text).slice(0, 3900) }),
   }).catch((e) => console.error('Telegram xatosi:', e.message));
 }
+/* ---- Jonli aloqa (SSE): admin panelga buyurtma darrov keladi ---- */
+const sseClients = new Set();
+function broadcast(ev, data) {
+  const msg = 'event: ' + ev + '\ndata: ' + JSON.stringify(data) + '\n\n';
+  for (const r of sseClients) { try { r.write(msg); } catch { sseClients.delete(r); } }
+}
+setInterval(() => { for (const r of sseClients) { try { r.write(': ping\n\n'); } catch { sseClients.delete(r); } } }, 25000).unref();
+const pubSettings = () => {
+  const { admin, ...rest } = db.settings;
+  return { ...rest, telegramOn: !!(process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) };
+};
 const fmt = (n) => new Intl.NumberFormat('ru-RU').format(Math.round(n)).replace(/\u00a0/g, ' ') + " so'm";
 function orderText(o, head) {
   return head + ' №' + o.id + '\n' + o.name + ' +' + o.phone + '\n' + o.address +
@@ -299,7 +310,7 @@ async function api(req, res, url) {
   if (m === 'GET' && p === '/api/shop') {
     const s = db.settings;
     return send(res, 200, {
-      settings: { shopName: s.shopName, tagline: s.tagline, phone: s.phone, telegram: s.telegram, address: s.address, deliveryFee: s.deliveryFee, freeDeliveryFrom: s.freeDeliveryFrom },
+      settings: { shopName: s.shopName, tagline: s.tagline, phone: s.phone, telegram: s.telegram, address: s.address, announcement: s.announcement || '', deliveryFee: s.deliveryFee, freeDeliveryFrom: s.freeDeliveryFrom },
       categories: db.categories.slice().sort((a, b) => a.order - b.order),
       products: db.products.map(publicProduct),
     });
@@ -383,6 +394,7 @@ async function api(req, res, url) {
     };
     db.orders.push(o); save();
     notify(orderText(o, '🛍 YANGI BUYURTMA'));
+    broadcast('order', { id: o.id, name: o.name, total: o.total });
     return send(res, 200, { order: publicOrder(o, true) });
   }
   if (m === 'GET' && p === '/api/my/orders') {
@@ -408,6 +420,7 @@ async function api(req, res, url) {
     if (o.status === 'new') o.status = 'pending_payment';
     save();
     notify(orderText(o, "💳 TO'LOV QILINDI (tekshiring)"));
+    broadcast('payment', { id: o.id, name: o.name, total: o.total });
     return send(res, 200, { order: publicOrder(o, false) });
   }
 
@@ -424,18 +437,59 @@ async function api(req, res, url) {
     if (m === 'GET' && p === '/api/admin/me') return send(res, 200, { admin: !!as });
     if (!as) return fail(res, 401, 'Admin sifatida kiring');
 
+    if (m === 'GET' && p === '/api/admin/events') {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+      res.write('retry: 3000\n\n');
+      sseClients.add(res);
+      req.on('close', () => sseClients.delete(res));
+      return;
+    }
+    if (m === 'GET' && p === '/api/admin/backup') {
+      const { admin, ...rest } = db.settings;
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': 'attachment; filename="elite-men-zaxira-' + now().slice(0, 10) + '.json"', 'Cache-Control': 'no-store' });
+      return res.end(JSON.stringify({ ...db, settings: rest }, null, 1));
+    }
+    if (m === 'POST' && p === '/api/admin/restore') {
+      const b = await readBody(req, 30 * 1024 * 1024);
+      const d = b.db;
+      if (!d || !Array.isArray(d.products) || !Array.isArray(d.orders) || !Array.isArray(d.categories) || !Array.isArray(d.users) || typeof d.settings !== 'object' || !d.settings) return fail(res, 400, "Zaxira fayli noto'g'ri");
+      db = { ...d, counter: Math.max(Number(d.counter) || 1000, ...d.orders.map((o) => Number(o.id) || 0)), settings: { ...d.settings, admin: db.settings.admin } };
+      save();
+      return send(res, 200, { ok: true });
+    }
+    if (m === 'POST' && p === '/api/admin/telegram-test') {
+      const tok = process.env.TELEGRAM_BOT_TOKEN, chat = process.env.TELEGRAM_CHAT_ID;
+      if (!tok || !chat) return fail(res, 400, 'TELEGRAM_BOT_TOKEN va TELEGRAM_CHAT_ID sozlanmagan');
+      const r = await fetch('https://api.telegram.org/bot' + tok + '/sendMessage', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: chat, text: '✅ Sinov xabari: Telegram bildirishnomasi ishlayapti.' }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) return fail(res, 400, 'Telegram xatosi: ' + (j.description || r.status));
+      return send(res, 200, { ok: true });
+    }
     if (m === 'POST' && p === '/api/admin/logout') { sessions.delete(as.token); setCookie(res, 'asid', '', 0); return send(res, 200, { ok: true }); }
 
     if (m === 'GET' && p === '/api/admin/stats') {
       const paid = db.orders.filter((o) => o.payment.status === 'paid' && o.status !== 'cancelled');
-      const today = new Date().toISOString().slice(0, 10);
+      const dayOf = (iso) => new Date(new Date(iso).getTime() + 5 * 3600000).toISOString().slice(0, 10); // Toshkent vaqti
+      const today = dayOf(now());
+      const days = [];
+      for (let i = 6; i >= 0; i--) {
+        const d = dayOf(new Date(Date.now() - i * 86400000).toISOString());
+        const os = db.orders.filter((o) => dayOf(o.createdAt) === d && o.status !== 'cancelled');
+        days.push({ date: d, orders: os.length, revenue: os.filter((o) => o.payment.status === 'paid').reduce((a, o) => a + o.total, 0) });
+      }
+      const tp = {};
+      for (const o of db.orders) if (o.status !== 'cancelled') for (const it of o.items) {
+        const t = tp[it.pid] || (tp[it.pid] = { name: it.name, image: it.image, qty: 0, sum: 0 });
+        t.qty += it.qty; t.sum += it.price * it.qty;
+      }
+      const top = Object.values(tp).sort((a, b) => b.qty - a.qty).slice(0, 5);
       return send(res, 200, {
         orders: db.orders.length,
         newOrders: db.orders.filter((o) => o.status === 'new').length,
         pendingPayments: db.orders.filter((o) => o.payment.status === 'pending' && o.status !== 'cancelled').length,
         revenue: paid.reduce((a, o) => a + o.total, 0),
-        todayRevenue: paid.filter((o) => (o.payment.confirmedAt || o.createdAt).slice(0, 10) === today).reduce((a, o) => a + o.total, 0),
-        customers: db.users.length, products: db.products.length,
+        todayRevenue: paid.filter((o) => dayOf(o.payment.confirmedAt || o.createdAt) === today).reduce((a, o) => a + o.total, 0),
+        customers: db.users.length, products: db.products.length, days, top,
         recent: db.orders.slice(-6).reverse().map(adminOrder),
       });
     }
@@ -522,11 +576,11 @@ async function api(req, res, url) {
       save(); return send(res, 200, { ok: true });
     }
 
-    if (m === 'GET' && p === '/api/admin/settings') { const { admin, ...rest } = db.settings; return send(res, 200, { settings: rest }); }
+    if (m === 'GET' && p === '/api/admin/settings') return send(res, 200, { settings: pubSettings() });
     if (m === 'PUT' && p === '/api/admin/settings') {
       const b = await readBody(req);
       const s = db.settings;
-      for (const k of ['shopName', 'tagline', 'phone', 'telegram', 'address', 'cardHolder']) if (b[k] !== undefined) s[k] = clean(b[k], 120);
+      for (const k of ['shopName', 'tagline', 'phone', 'telegram', 'address', 'cardHolder', 'announcement']) if (b[k] !== undefined) s[k] = clean(b[k], 120);
       if (b.cardNumber !== undefined) {
         const digits = String(b.cardNumber).replace(/\D/g, '');
         if (digits.length < 12 || digits.length > 19) return fail(res, 400, "Karta raqami noto'g'ri");
@@ -534,8 +588,7 @@ async function api(req, res, url) {
       }
       for (const k of ['deliveryFee', 'freeDeliveryFrom']) if (b[k] !== undefined) s[k] = Math.max(0, parseInt(b[k], 10) || 0);
       save();
-      const { admin, ...rest } = s;
-      return send(res, 200, { settings: rest });
+      return send(res, 200, { settings: pubSettings() });
     }
     if (m === 'POST' && p === '/api/admin/password') {
       const b = await readBody(req);
