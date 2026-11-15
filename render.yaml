@@ -2,19 +2,17 @@ services:
   - type: web
     name: elite-men-shop
     runtime: node
-    plan: starter
+    plan: free
     startCommand: node server.js
     healthCheckPath: /healthz
     envVars:
-      - key: DATA_DIR
-        value: /var/data
       - key: TRUST_PROXY
         value: "1"
       - key: COOKIE_SECURE
         value: "1"
       - key: ADMIN_PASSWORD
         sync: false
-    disk:
-      name: shop-data
-      mountPath: /var/data
-      sizeGB: 1
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
