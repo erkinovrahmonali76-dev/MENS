@@ -25,7 +25,7 @@ function fileToDataURL(file, max = 1400) {
   });
 }
 
-const A = { tab: 'dash', orders: [], products: [], cats: [], users: [], settings: null, filter: 'all' };
+const A = { tab: 'dash', orders: [], products: [], cats: [], users: [], settings: null, filter: 'all', q: '', pq: '', uq: '', sse: false };
 
 /* ------------------------------------------------------------ login */
 function renderLogin() {
@@ -42,13 +42,14 @@ function renderLogin() {
 /* ------------------------------------------------------------ shell */
 const TABS = [['dash', '📊', 'Boshqaruv'], ['orders', '🧾', 'Buyurtmalar'], ['products', '👔', 'Mahsulotlar'], ['cats', '🗂️', "Bo'limlar"], ['users', '👥', 'Mijozlar'], ['settings', '⚙️', 'Sozlamalar']];
 function shell() {
-  const pend = A.orders.filter((o) => o.payment.status === 'pending' && o.status !== 'cancelled').length + A.orders.filter((o) => o.status === 'new' && o.payment.status === 'unpaid').length * 0;
+  const pend = A.orders.filter((o) => o.status !== 'cancelled' && (o.status === 'new' || o.payment.status === 'pending')).length;
   $('#root').innerHTML = `<div class="app"><aside><div class="brand">ADMIN <span>PANEL</span></div>
     ${TABS.map(([k, i, l]) => `<button class="nav ${A.tab === k ? 'on' : ''}" data-t="${k}">${i} ${l}${k === 'orders' && pend ? `<span class="pill">${pend}</span>` : ''}</button>`).join('')}
-    <div class="sp"></div><a href="/" target="_blank" class="nav" style="color:#cfc6b0;text-decoration:none;padding:11px 12px">🌐 Saytni ko'rish</a>
+    <div class="sp"></div><div class="live ${A.sse ? 'on' : ''}" style="padding:0 12px 10px"><i></i> ${A.sse ? 'Jonli ulangan' : 'Ulanmoqda…'}</div><button class="nav" id="snd">${sndOn() ? '🔔 Tovush: yoqilgan' : '🔕 Tovush: yopiq'}</button><a href="/" target="_blank" class="nav" style="color:#cfc6b0;text-decoration:none;padding:11px 12px">🌐 Saytni ko'rish</a>
     <button class="nav" id="lo">🚪 Chiqish</button></aside><main id="main"></main></div>`;
   document.querySelectorAll('aside button[data-t]').forEach((b) => b.onclick = () => { A.tab = b.dataset.t; render(); });
-  $('#lo').onclick = async () => { await api('/api/admin/logout', 'POST'); renderLogin(); };
+  $('#snd').onclick = () => { localStorage.setItem('snd', sndOn() ? '0' : '1'); if (sndOn()) beep(); render(); };
+  $('#lo').onclick = async () => { await api('/api/admin/logout', 'POST'); if (es) { es.close(); es = null; } renderLogin(); };
 }
 async function loadAll() {
   const [o, p, c, u, s] = await Promise.all([api('/api/admin/orders'), api('/api/shop'), null, api('/api/admin/users'), api('/api/admin/settings')]);
@@ -57,7 +58,7 @@ async function loadAll() {
 async function start() {
   const me = await fetch('/api/admin/me', { credentials: 'same-origin' }).then((r) => r.json()).catch(() => ({}));
   if (!me.admin) return renderLogin();
-  await loadAll(); render();
+  await loadAll(); render(); connectLive();
 }
 async function render() {
   shell();
@@ -66,17 +67,66 @@ async function render() {
 }
 async function refresh() { await loadAll(); render(); }
 
+/* ------------------------------------------------------------ jonli aloqa */
+function sndOn() { return localStorage.getItem('snd') !== '0'; }
+let actx;
+function beep() {
+  try {
+    actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+    [880, 1175, 1480].forEach((f, i) => {
+      const o = actx.createOscillator(), g = actx.createGain(); o.frequency.value = f; o.connect(g); g.connect(actx.destination);
+      const t = actx.currentTime + i * 0.16;
+      g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.25, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.15);
+      o.start(t); o.stop(t + 0.16);
+    });
+  } catch (e) { /* */ }
+}
+let es = null, unread = 0;
+const baseTitle = document.title;
+window.addEventListener('focus', () => { unread = 0; document.title = baseTitle; });
+function paintLive() {
+  const l = document.querySelector('.live'); if (!l) return;
+  l.classList.toggle('on', A.sse); l.lastChild.textContent = A.sse ? ' Jonli ulangan' : ' Ulanmoqda…';
+}
+async function refreshQuiet() {
+  try {
+    await loadAll();
+    const ae = document.activeElement;
+    if (!(ae && /INPUT|TEXTAREA|SELECT/.test(ae.tagName) && ae.closest('main'))) render();
+  } catch (e) { /* */ }
+}
+function connectLive() {
+  if (es) return;
+  es = new EventSource('/api/admin/events');
+  es.onopen = () => { A.sse = true; paintLive(); };
+  es.onerror = () => { A.sse = false; paintLive(); if (es && es.readyState === 2) es = null; };
+  const on = (txt) => (e) => {
+    let d = {}; try { d = JSON.parse(e.data); } catch (x) { /* */ }
+    if (sndOn()) beep();
+    toast(txt(d)); unread++; document.title = '(' + unread + ') ' + baseTitle;
+    refreshQuiet();
+  };
+  es.addEventListener('order', on((d) => '🛍 Yangi buyurtma №' + d.id + ' — ' + d.name + ' · ' + money(d.total)));
+  es.addEventListener('payment', on((d) => "💳 To'lov keldi №" + d.id + ' — tekshiring'));
+}
+
 /* ------------------------------------------------------------ dashboard */
 async function viewDash(m) {
   m.innerHTML = '<h1 class="t">Boshqaruv paneli</h1><div id="dc">Yuklanmoqda…</div>';
   const s = await api('/api/admin/stats');
+  const mx = Math.max(1, ...s.days.map((d) => d.orders));
+  const dn = ['Yak', 'Dush', 'Sesh', 'Chor', 'Pay', 'Juma', 'Shan'];
   $('#dc').innerHTML = `<div class="cards">
     <div class="stat"><small>Jami buyurtmalar</small><b>${s.orders}</b></div>
+    <div class="stat"><small>Bugungi buyurtmalar</small><b>${s.days[6].orders}</b></div>
     <div class="stat"><small>Yangi buyurtmalar</small><b>${s.newOrders}</b></div>
     <div class="stat"><small>To'lov kutilmoqda</small><b style="color:var(--warn)">${s.pendingPayments}</b></div>
     <div class="stat"><small>Tasdiqlangan tushum</small><b style="color:var(--ok)">${money(s.revenue)}</b></div>
     <div class="stat"><small>Bugungi tushum</small><b>${money(s.todayRevenue)}</b></div>
     <div class="stat"><small>Mijozlar / Mahsulotlar</small><b>${s.customers} / ${s.products}</b></div></div>
+    <div class="two2"><div class="box"><h3 style="margin-bottom:10px">So'nggi 7 kun (buyurtmalar soni)</h3>
+      <div class="chart">${s.days.map((d) => `<div class="col" title="Tushum: ${esc(money(d.revenue))}"><b style="color:var(--ink);font-size:12px">${d.orders}</b><div class="bar" style="height:${Math.max(3, Math.round(d.orders / mx * 100))}px"></div><span>${dn[new Date(d.date).getUTCDay()]} ${esc(d.date.slice(8))}</span></div>`).join('')}</div></div>
+      <div class="box"><h3 style="margin-bottom:10px">Eng ko'p sotilganlar</h3>${s.top.length ? s.top.map((t) => `<div class="top"><img class="thumb" src="${esc(t.image)}" alt=""><span class="nm">${esc(t.name)}</span><b>${t.qty} ta</b></div>`).join('') : '<p style="color:var(--muted)">Hali sotuv yo\'q</p>'}</div></div>
     <div class="box"><h3 style="margin-bottom:10px">So'nggi buyurtmalar</h3>${ordersTable(s.recent)}</div>`;
   bindOrderRows();
 }
@@ -91,12 +141,32 @@ function ordersTable(list) {
     <td><span class="st st-${esc(o.status)}">${esc(STATUS[o.status])}</span></td><td style="white-space:nowrap">${esc(fdate(o.createdAt))}</td></tr>`).join('')}</table>`;
 }
 function bindOrderRows() { document.querySelectorAll('tr[data-o]').forEach((r) => r.onclick = () => openOrder(r.dataset.o)); }
+function orderFilter() {
+  const f = A.filter, q = A.q.trim().toLowerCase();
+  return A.orders.filter((o) => (f === 'all' || (f === 'payment' ? o.payment.status === 'pending' && o.status !== 'cancelled' : o.status === f)) &&
+    (!q || [o.id, o.name, o.phone, o.address].join(' ').toLowerCase().includes(q)));
+}
+function exportCSV(list) {
+  const cell = (v) => '"' + String(v ?? '').replace(/"/g, '""') + '"';
+  const rows = [['№', 'Sana', 'Mijoz', 'Telefon', 'Manzil', 'Mahsulotlar', 'Yetkazish', 'Jami', "To'lov", 'Holat']]
+    .concat(list.map((o) => [o.id, fdate(o.createdAt), o.name, '+' + o.phone, o.address,
+      o.items.map((i) => i.name + (i.size ? ' (' + i.size + ')' : '') + ' x' + i.qty).join('; '), o.delivery, o.total, PAYST[o.payment.status], STATUS[o.status]]));
+  const csv = '\ufeff' + rows.map((r) => r.map(cell).join(',')).join('\r\n');
+  const el = document.createElement('a');
+  el.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+  el.download = 'buyurtmalar-' + new Date().toISOString().slice(0, 10) + '.csv'; el.click();
+  setTimeout(() => URL.revokeObjectURL(el.href), 1000);
+}
 function viewOrders(m) {
   const f = A.filter;
-  const list = A.orders.filter((o) => f === 'all' || (f === 'payment' ? o.payment.status === 'pending' && o.status !== 'cancelled' : o.status === f));
   const chips = [['all', 'Hammasi'], ['payment', "To'lov tekshiruvi"], ...Object.entries(STATUS)];
-  m.innerHTML = `<h1 class="t">Buyurtmalar</h1><div class="filters">${chips.map(([k, l]) => `<button class="chip ${f === k ? 'on' : ''}" data-f="${k}">${esc(l)}</button>`).join('')}</div><div class="box">${ordersTable(list)}</div>`;
+  m.innerHTML = `<h1 class="t">Buyurtmalar <button class="btn line sm" id="ex" style="margin-left:auto">⬇ Excel (CSV)</button></h1>
+    <div class="filters">${chips.map(([k, l]) => `<button class="chip ${f === k ? 'on' : ''}" data-f="${k}">${esc(l)}</button>`).join('')}</div>
+    <div class="filters"><input class="search" id="oq" placeholder="Qidirish: №, ism, telefon, manzil…" value="${esc(A.q)}"></div>
+    <div class="box" id="ot">${ordersTable(orderFilter())}</div>`;
   m.querySelectorAll('.chip').forEach((c) => c.onclick = () => { A.filter = c.dataset.f; render(); });
+  $('#oq').oninput = (e) => { A.q = e.target.value; $('#ot').innerHTML = ordersTable(orderFilter()); bindOrderRows(); };
+  $('#ex').onclick = () => exportCSV(orderFilter());
   bindOrderRows();
 }
 function modal(html) {
@@ -116,16 +186,17 @@ async function openOrder(id) {
     <tr><td colspan="3" style="text-align:right">Yetkazish</td><td>${o.delivery ? money(o.delivery) : 'Bepul'}</td></tr>
     <tr><td colspan="3" style="text-align:right"><b>Jami</b></td><td><b>${money(o.total)}</b></td></tr></table>
     ${o.payment.receipt ? `<p style="margin-top:14px"><b>To'lov cheki:</b></p><a href="/api/admin/receipt/${esc(o.payment.receipt)}" target="_blank"><img class="receipt" src="/api/admin/receipt/${esc(o.payment.receipt)}" alt="chek"></a>` : '<p style="margin-top:14px;color:var(--muted)">Chek yuklanmagan.</p>'}
-    <div class="field" style="margin-top:16px"><label>Ichki izoh (mijoz ko'rmaydi)</label><textarea id="an" rows="2">${esc(o.adminNote)}</textarea></div>
-    <div class="field"><label>Buyurtma holati</label><select id="ss">${Object.entries(STATUS).map(([k, v]) => `<option value="${k}" ${o.status === k ? 'selected' : ''}>${esc(v)}</option>`).join('')}</select></div>
+    <div class="field noprint" style="margin-top:16px"><label>Ichki izoh (mijoz ko'rmaydi)</label><textarea id="an" rows="2">${esc(o.adminNote)}</textarea></div>
+    <div class="field noprint"><label>Buyurtma holati</label><select id="ss">${Object.entries(STATUS).map(([k, v]) => `<option value="${k}" ${o.status === k ? 'selected' : ''}>${esc(v)}</option>`).join('')}</select></div>
     <div id="me"></div>
-    <div class="row">${o.payment.status !== 'paid' ? '<button class="btn ok" id="bpaid">✓ To\'lovni qabul qilish</button>' : '<button class="btn line" id="bunpaid">To\'lovni bekor qilish</button>'}
-      <button class="btn gold" id="bsave">Saqlash</button><button class="btn bad" id="bdel" style="margin-left:auto">O'chirish</button></div>`);
+    <div class="row noprint">${o.payment.status !== 'paid' ? '<button class="btn ok" id="bpaid">✓ To\'lovni qabul qilish</button>' : '<button class="btn line" id="bunpaid">To\'lovni bekor qilish</button>'}
+      <button class="btn line" id="bprint">🖨 Chop etish</button><button class="btn gold" id="bsave">Saqlash</button><button class="btn bad" id="bdel" style="margin-left:auto">O'chirish</button></div>`);
   const put = async (body, msg) => {
     try { await api('/api/admin/orders/' + o.id, 'PUT', body); toast(msg); bg.remove(); await refresh(); }
     catch (e) { $('#me', bg).innerHTML = `<div class="err">${esc(e.message)}</div>`; }
   };
   $('#bsave', bg).onclick = () => put({ status: $('#ss', bg).value, adminNote: $('#an', bg).value }, 'Saqlandi ✓');
+  $('#bprint', bg).onclick = () => window.print();
   if ($('#bpaid', bg)) $('#bpaid', bg).onclick = () => put({ paymentStatus: 'paid', adminNote: $('#an', bg).value }, "To'lov tasdiqlandi ✓");
   if ($('#bunpaid', bg)) $('#bunpaid', bg).onclick = () => put({ paymentStatus: 'unpaid' }, "To'lov bekor qilindi");
   $('#bdel', bg).onclick = async () => {
@@ -135,20 +206,37 @@ async function openOrder(id) {
 }
 
 /* ------------------------------------------------------------ products */
-function viewProducts(m) {
+function prodTable() {
   const cn = (id) => (A.cats.find((c) => c.id === id) || {}).name || '—';
-  m.innerHTML = `<h1 class="t">Mahsulotlar <button class="btn gold" id="np" style="margin-left:auto">+ Yangi mahsulot</button></h1>
-    <div class="box"><table><tr><th></th><th>Nomi</th><th>Bo'lim</th><th>Narx</th><th>Holat</th><th></th></tr>${A.products.map((p) => `<tr>
-      <td><img class="thumb" src="${esc(p.images[0] || '')}" alt=""></td><td><b>${esc(p.name)}</b><br><small style="color:var(--muted)">${esc(p.sizes.join(', '))}</small></td>
-      <td>${esc(cn(p.category))}</td><td><b>${money(p.price)}</b>${p.oldPrice ? `<br><s style="color:var(--muted)">${money(p.oldPrice)}</s>` : ''}</td>
-      <td>${p.inStock ? '<span class="st st-confirmed">Sotuvda</span>' : '<span class="st st-cancelled">Yo\'q</span>'}${p.featured ? ' ⭐' : ''}</td>
-      <td style="white-space:nowrap"><button class="btn line sm" data-e="${esc(p.id)}">Tahrirlash</button> <button class="btn bad sm" data-d="${esc(p.id)}">O'chirish</button></td></tr>`).join('')}</table></div>`;
-  $('#np').onclick = () => productForm(null);
+  const q = A.pq.trim().toLowerCase();
+  const list = A.products.filter((p) => !q || (p.name + ' ' + cn(p.category)).toLowerCase().includes(q));
+  if (!list.length) return '<p style="color:var(--muted);padding:14px 0">Mahsulot topilmadi</p>';
+  return `<table><tr><th></th><th>Nomi</th><th>Bo'lim</th><th>Narx</th><th>Holat</th><th></th></tr>${list.map((p) => `<tr>
+    <td><img class="thumb" src="${esc(p.images[0] || '')}" alt=""></td><td><b>${esc(p.name)}</b><br><small style="color:var(--muted)">${esc(p.sizes.join(', '))}</small></td>
+    <td>${esc(cn(p.category))}</td><td><b>${money(p.price)}</b>${p.oldPrice ? `<br><s style="color:var(--muted)">${money(p.oldPrice)}</s>` : ''}</td>
+    <td><button class="chip" data-s="${esc(p.id)}" title="Bosib almashtiring">${p.inStock ? '✅ Sotuvda' : "⛔ Yo'q"}</button>${p.featured ? ' ⭐' : ''}</td>
+    <td style="white-space:nowrap"><button class="btn line sm" data-e="${esc(p.id)}">Tahrirlash</button> <button class="btn line sm" data-c="${esc(p.id)}">Nusxa</button> <button class="btn bad sm" data-d="${esc(p.id)}">O'chirish</button></td></tr>`).join('')}</table>`;
+}
+function bindProd(m) {
   m.querySelectorAll('[data-e]').forEach((b) => b.onclick = () => productForm(A.products.find((p) => p.id === b.dataset.e)));
+  m.querySelectorAll('[data-s]').forEach((b) => b.onclick = async () => {
+    const p = A.products.find((x) => x.id === b.dataset.s);
+    try { await api('/api/admin/products/' + p.id, 'PUT', { ...p, inStock: !p.inStock }); toast(p.inStock ? 'Sotuvdan olindi' : "Sotuvga qo'yildi"); refresh(); } catch (e) { toast(e.message); }
+  });
+  m.querySelectorAll('[data-c]').forEach((b) => b.onclick = async () => {
+    const p = A.products.find((x) => x.id === b.dataset.c);
+    try { await api('/api/admin/products', 'POST', { ...p, name: p.name + ' (nusxa)', featured: false }); toast('Nusxa yaratildi ✓'); refresh(); } catch (e) { toast(e.message); }
+  });
   m.querySelectorAll('[data-d]').forEach((b) => b.onclick = async () => {
     if (!confirm("Mahsulot o'chirilsinmi?")) return;
     try { await api('/api/admin/products/' + b.dataset.d, 'DELETE'); toast("O'chirildi"); refresh(); } catch (e) { toast(e.message); }
   });
+}
+function viewProducts(m) {
+  m.innerHTML = `<h1 class="t">Mahsulotlar <input class="search" id="pq" placeholder="Qidirish…" value="${esc(A.pq)}"><button class="btn gold" id="np" style="margin-left:auto">+ Yangi mahsulot</button></h1><div class="box" id="pt">${prodTable()}</div>`;
+  $('#np').onclick = () => productForm(null);
+  $('#pq').oninput = (e) => { A.pq = e.target.value; $('#pt').innerHTML = prodTable(); bindProd(m); };
+  bindProd(m);
 }
 function productForm(p) {
   const d = p || { name: '', brand: '', category: (A.cats[0] || {}).id, price: '', oldPrice: '', desc: '', images: [], sizes: ['M', 'L', 'XL', 'XXL'], colors: [], inStock: true, featured: false };
@@ -207,14 +295,25 @@ function viewCats(m) {
 }
 
 /* ------------------------------------------------------------ users */
-function viewUsers(m) {
-  m.innerHTML = `<h1 class="t">Mijozlar (${A.users.length})</h1><div class="box">${A.users.length ? `<table><tr><th>Ism</th><th>Telefon</th><th>Buyurtmalar</th><th>Xaridlar</th><th>Ro'yxatdan o'tgan</th><th></th></tr>${A.users.map((u) => `<tr>
+function userTable() {
+  const q = A.uq.trim().toLowerCase();
+  const list = A.users.filter((u) => !q || (u.name + ' ' + u.phone).toLowerCase().includes(q));
+  if (!list.length) return '<p style="color:var(--muted)">Mijoz topilmadi.</p>';
+  return `<table><tr><th>Ism</th><th>Telefon</th><th>Buyurtmalar</th><th>Xaridlar</th><th>Ro'yxatdan o'tgan</th><th></th></tr>${list.map((u) => `<tr>
     <td><b>${esc(u.name)}</b></td><td><a href="tel:+${esc(u.phone)}">+${esc(u.phone)}</a></td><td>${u.orders}</td><td>${money(u.spent)}</td><td>${esc(fdate(u.createdAt))}</td>
-    <td><button class="btn bad sm" data-d="${esc(u.id)}">O'chirish</button></td></tr>`).join('')}</table>` : '<p style="color:var(--muted)">Hali ro\'yxatdan o\'tgan mijozlar yo\'q.</p>'}</div>`;
+    <td style="white-space:nowrap"><button class="btn line sm" data-o="${esc(u.phone)}">Buyurtmalari</button> <button class="btn bad sm" data-d="${esc(u.id)}">O'chirish</button></td></tr>`).join('')}</table>`;
+}
+function bindUsers(m) {
+  m.querySelectorAll('[data-o]').forEach((b) => b.onclick = () => { A.q = b.dataset.o; A.filter = 'all'; A.tab = 'orders'; render(); });
   m.querySelectorAll('[data-d]').forEach((b) => b.onclick = async () => {
     if (!confirm("Mijoz profili o'chirilsinmi? (Buyurtmalari saqlanadi)")) return;
     try { await api('/api/admin/users/' + b.dataset.d, 'DELETE'); toast("O'chirildi"); refresh(); } catch (e) { toast(e.message); }
   });
+}
+function viewUsers(m) {
+  m.innerHTML = `<h1 class="t">Mijozlar (${A.users.length}) <input class="search" id="uq" placeholder="Ism yoki telefon…" value="${esc(A.uq)}"></h1><div class="box" id="ut">${userTable()}</div>`;
+  $('#uq').oninput = (e) => { A.uq = e.target.value; $('#ut').innerHTML = userTable(); bindUsers(m); };
+  bindUsers(m);
 }
 
 /* ------------------------------------------------------------ settings */
@@ -227,6 +326,7 @@ function viewSettings(m) {
     <h3 style="margin:10px 0 14px">🏪 Do'kon ma'lumotlari</h3>
     <div class="frow"><div class="field"><label>Do'kon nomi</label><input name="shopName" value="${esc(s.shopName)}"></div><div class="field"><label>Shior</label><input name="tagline" value="${esc(s.tagline)}"></div></div>
     <div class="frow"><div class="field"><label>Telefon</label><input name="phone" value="${esc(s.phone)}"></div><div class="field"><label>Telegram (@username yoki havola)</label><input name="telegram" value="${esc(s.telegram)}"></div></div>
+    <div class="field"><label>Yuqoridagi e'lon (bo'sh qoldirsangiz — bepul yetkazish matni chiqadi)</label><input name="announcement" value="${esc(s.announcement || '')}" maxlength="120"></div>
     <div class="field"><label>Manzil</label><input name="address" value="${esc(s.address)}"></div>
     <div class="frow"><div class="field"><label>Yetkazish narxi (so'm)</label><input name="deliveryFee" type="number" min="0" value="${esc(s.deliveryFee)}"></div>
       <div class="field"><label>Bepul yetkazish (shu summadan)</label><input name="freeDeliveryFrom" type="number" min="0" value="${esc(s.freeDeliveryFrom)}"></div></div>
@@ -234,7 +334,20 @@ function viewSettings(m) {
   <div class="box"><h3 style="margin-bottom:14px">🔑 Admin parolini o'zgartirish</h3><div id="pe"></div><form id="pf">
     <div class="frow"><div class="field"><label>Joriy parol</label><input type="password" name="oldPassword" required autocomplete="current-password"></div>
       <div class="field"><label>Yangi parol (kamida 8 ta belgi)</label><input type="password" name="newPassword" required minlength="8" autocomplete="new-password"></div></div>
-    <button class="btn">Parolni almashtirish</button></form></div>`;
+    <button class="btn">Parolni almashtirish</button></form></div>
+  <div class="box"><h3 style="margin-bottom:10px">🔔 Bildirishnomalar</h3>
+    <p style="color:var(--muted);margin-bottom:12px">Yangi buyurtma va to'lov paneldagi ovoz bilan hamda Telegram orqali darrov xabar qilinadi. Telegram: ${s.telegramOn ? '<b style="color:var(--ok)">ulangan ✓</b>' : '<b style="color:var(--bad)">ulanmagan</b> (Render → Environment: TELEGRAM_BOT_TOKEN va TELEGRAM_CHAT_ID)'}</p>
+    <div class="row"><button class="btn line" id="tgt">Telegramga sinov xabari</button><button class="btn line" id="snt">🔔 Tovushni tekshirish</button></div></div>
+  <div class="box"><h3 style="margin-bottom:10px">💾 Zaxira nusxa</h3>
+    <p style="color:var(--muted);margin-bottom:12px">Buyurtmalar, mijozlar va mahsulotlarni faylga yuklab oling (rasmlar va cheklar bu faylga kirmaydi). Fayl maxfiy — begonalarga bermang.</p>
+    <div class="row"><a class="btn gold" href="/api/admin/backup">⬇ Zaxirani yuklab olish</a><label class="btn line">⬆ Zaxiradan tiklash<input type="file" id="rst" accept=".json,application/json" hidden></label></div></div>`;
+  $('#tgt').onclick = async () => { try { await api('/api/admin/telegram-test', 'POST'); toast('Yuborildi ✓'); } catch (er) { toast(er.message); } };
+  $('#snt').onclick = beep;
+  $('#rst').onchange = async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    if (!confirm("Hozirgi barcha ma'lumotlar zaxira bilan almashtiriladi. Davom etasizmi?")) { e.target.value = ''; return; }
+    try { await api('/api/admin/restore', 'POST', { db: JSON.parse(await f.text()) }); toast('Tiklandi ✓'); refresh(); } catch (er) { toast(er.message); }
+  };
   $('#sf').onsubmit = async (e) => {
     e.preventDefault();
     try { const r = await api('/api/admin/settings', 'PUT', Object.fromEntries(new FormData(e.target))); A.settings = r.settings; toast('Saqlandi ✓'); render(); }
