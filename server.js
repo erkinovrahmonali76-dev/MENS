@@ -176,6 +176,23 @@ function limited(key, max, windowMs) {
 }
 setInterval(() => { const n = Date.now(); for (const [k, v] of hits) if (v.reset < n) hits.delete(k); }, 600000).unref();
 
+
+/* ----------------------------------------------- Telegram xabarnoma (ixtiyoriy) */
+function notify(text) {
+  const tok = process.env.TELEGRAM_BOT_TOKEN, chat = process.env.TELEGRAM_CHAT_ID;
+  if (!tok || !chat || typeof fetch !== 'function') return;
+  fetch('https://api.telegram.org/bot' + tok + '/sendMessage', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: chat, text: String(text).slice(0, 3900) }),
+  }).catch((e) => console.error('Telegram xatosi:', e.message));
+}
+const fmt = (n) => new Intl.NumberFormat('ru-RU').format(Math.round(n)).replace(/\u00a0/g, ' ') + " so'm";
+function orderText(o, head) {
+  return head + ' №' + o.id + '\n' + o.name + ' +' + o.phone + '\n' + o.address +
+    '\n\n' + o.items.map((i) => '• ' + i.name + (i.size ? ' (' + i.size + ')' : '') + (i.color ? ' ' + i.color : '') + ' × ' + i.qty).join('\n') +
+    '\n\nJami: ' + fmt(o.total) + (o.note ? '\nIzoh: ' + o.note : '') + '\nAdmin panel: /admin';
+}
+
 /* ------------------------------------------------------------ http utils */
 function send(res, code, obj) {
   const b = JSON.stringify(obj);
@@ -365,6 +382,7 @@ async function api(req, res, url) {
       status: 'new', payment: { status: 'unpaid', receipt: null, paidAt: null }, adminNote: '', createdAt: now(),
     };
     db.orders.push(o); save();
+    notify(orderText(o, '🛍 YANGI BUYURTMA'));
     return send(res, 200, { order: publicOrder(o, true) });
   }
   if (m === 'GET' && p === '/api/my/orders') {
@@ -389,6 +407,7 @@ async function api(req, res, url) {
     o.payment.paidAt = now();
     if (o.status === 'new') o.status = 'pending_payment';
     save();
+    notify(orderText(o, "💳 TO'LOV QILINDI (tekshiring)"));
     return send(res, 200, { order: publicOrder(o, false) });
   }
 
